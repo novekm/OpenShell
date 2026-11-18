@@ -1279,6 +1279,7 @@ pub async fn provider_create_with_options(options: ProviderCreateOptions<'_>) ->
         if let Err(configure_err) = client
             .configure_provider_refresh(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: provider_name.clone(),
                 credential_key: adc_credential_key.clone(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken as i32,
@@ -1307,6 +1308,7 @@ pub async fn provider_create_with_options(options: ProviderCreateOptions<'_>) ->
         if let Err(rotate_err) = client
             .rotate_provider_credential(RotateProviderCredentialRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: provider_name.clone(),
                 credential_key: adc_credential_key,
                 workspace_scope: Some(openshell_core::proto::workspace_selector(
@@ -1993,6 +1995,7 @@ pub async fn provider_refresh_config(
     let status = client
         .configure_provider_refresh(ConfigureProviderRefreshRequest {
             request_id: String::new(),
+            expected_resource_version: 0,
             provider: input.name.to_string(),
             credential_key: input.credential_key.to_string(),
             strategy: strategy as i32,
@@ -2033,6 +2036,7 @@ pub async fn provider_rotate(
     let status = client
         .rotate_provider_credential(RotateProviderCredentialRequest {
             request_id: String::new(),
+            expected_resource_version: 0,
             provider: name.to_string(),
             credential_key: credential_key.to_string(),
             workspace_scope: Some(openshell_core::proto::workspace_selector(

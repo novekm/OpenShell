@@ -975,6 +975,7 @@ async fn configure_and_rotate_capture_actual_grant_without_repeating_token_excha
             "default".to_string(),
         )),
         request_id: id(),
+        expected_resource_version: 0,
     };
     let rotated = run(&state, authed_request(rotate.clone()))
         .await

@@ -5110,6 +5110,7 @@ pub(super) async fn handle_configure_provider_refresh(
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
+    require_expected_provider_version(&provider, request.expected_resource_version)?;
     let catalog = state
         .provider_profile_sources
         .snapshot_catalog(state.store.as_ref(), &workspace)
@@ -5385,6 +5386,18 @@ pub(super) async fn handle_configure_provider_refresh(
     }))
 }
 
+/// Refuse a refresh mutation when the provider changed after the caller read it.
+/// An expected version of zero accepts the current provider.
+fn require_expected_provider_version(provider: &Provider, expected: u64) -> Result<(), Status> {
+    let current = provider.metadata.as_ref().map_or(0, |m| m.resource_version);
+    if expected != 0 && current != expected {
+        return Err(Status::aborted(format!(
+            "provider resource version changed (expected {expected}, current {current})"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) async fn handle_rotate_provider_credential(
     state: &Arc<ServerState>,
     request: Request<RotateProviderCredentialRequest>,
@@ -5410,6 +5423,15 @@ pub(super) async fn handle_rotate_provider_credential(
     }
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
+    }
+    if request.expected_resource_version != 0 {
+        let provider = state
+            .store
+            .get_message_by_name::<Provider>(&workspace, provider_name)
+            .await
+            .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
+            .ok_or_else(|| Status::not_found("provider not found"))?;
+        require_expected_provider_version(&provider, request.expected_resource_version)?;
     }
     let refreshed =
         CredentialRefresh::rotate(&state.refresh, &workspace, provider_name, credential_key)
@@ -8529,6 +8551,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -8625,6 +8648,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -8744,6 +8768,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_mutations_refuse_a_provider_that_changed_after_it_was_read() {
+        let state = test_server_state().await;
+        import_test_graph_refresh_profile(&state).await;
+        create_provider_record(
+            state.store.as_ref(),
+            "default",
+            Provider {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    name: "guarded".to_string(),
+                    workspace: "default".to_string(),
+                    ..Default::default()
+                }),
+                r#type: TEST_GRAPH_PROVIDER_TYPE.to_string(),
+                profile_workspace: "default".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let read = state
+            .store
+            .get_message_by_name::<Provider>("default", "guarded")
+            .await
+            .unwrap()
+            .unwrap();
+        let version = read.metadata.as_ref().unwrap().resource_version;
+        let configure = |expected_resource_version: u64| ConfigureProviderRefreshRequest {
+            request_id: String::new(),
+            expected_resource_version,
+            provider: "guarded".to_string(),
+            credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
+            strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
+            material: HashMap::from([
+                ("tenant_id".to_string(), "tenant".to_string()),
+                ("client_id".to_string(), "client-id".to_string()),
+                ("client_secret".to_string(), "client-secret".to_string()),
+            ]),
+            secret_material_keys: vec!["client_secret".to_string()],
+            expiration_time: None,
+            workspace_scope: Some(openshell_core::proto::workspace_selector(
+                "default".to_string(),
+            )),
+        };
+
+        let stale =
+            handle_configure_provider_refresh(&state, authed_request(configure(version + 1)))
+                .await
+                .unwrap_err();
+        assert_eq!(stale.code(), tonic::Code::Aborted);
+        assert!(
+            state
+                .refresh
+                .get("default", read.object_id(), "MS_GRAPH_ACCESS_TOKEN")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        handle_configure_provider_refresh(&state, authed_request(configure(version)))
+            .await
+            .unwrap();
+
+        let rotate = |expected_resource_version: u64| RotateProviderCredentialRequest {
+            request_id: String::new(),
+            expected_resource_version,
+            provider: "guarded".to_string(),
+            credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector(
+                "default".to_string(),
+            )),
+        };
+        let stale = handle_rotate_provider_credential(&state, authed_request(rotate(version + 1)))
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code(), tonic::Code::Aborted);
+    }
+
+    #[tokio::test]
     async fn configure_provider_refresh_conflict_cleans_only_staged_material() {
         let state = test_server_state().await;
         import_test_graph_refresh_profile(&state).await;
@@ -8765,6 +8867,7 @@ mod tests {
         .unwrap();
         let request = |client_secret: &str| ConfigureProviderRefreshRequest {
             request_id: String::new(),
+            expected_resource_version: 0,
             provider: "configure-conflict".to_string(),
             credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
             strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -8856,6 +8959,7 @@ mod tests {
         let state = test_server_state().await;
         let request = ConfigureProviderRefreshRequest {
             request_id: String::new(),
+            expected_resource_version: 0,
             provider: "any".to_string(),
             credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
             strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken as i32,
@@ -8920,6 +9024,7 @@ mod tests {
         );
         let request = |client_secret: &str| ConfigureProviderRefreshRequest {
             request_id: String::new(),
+            expected_resource_version: 0,
             provider: "configure-create-race".to_string(),
             credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
             strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9055,6 +9160,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "provider-a".to_string(),
                 credential_key: "REFRESH_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9205,6 +9311,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "vertex-sa".to_string(),
                 credential_key: "GOOGLE_VERTEX_AI_SERVICE_ACCOUNT_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::GoogleServiceAccountJwt as i32,
@@ -9279,6 +9386,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9394,6 +9502,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-delete".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -9646,6 +9755,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "refreshing-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9729,6 +9839,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "first-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9751,6 +9862,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "second-graph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9813,6 +9925,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9841,6 +9954,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "msgraph".to_string(),
                 credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -9898,6 +10012,7 @@ mod tests {
                 &state,
                 authed_request(ConfigureProviderRefreshRequest {
                     request_id: String::new(),
+                    expected_resource_version: 0,
                     provider: "msgraph".to_string(),
                     credential_key: "MS_GRAPH_ACCESS_TOKEN".to_string(),
                     strategy: strategy as i32,
@@ -12738,6 +12853,7 @@ mod tests {
         .unwrap();
         let configure = || ConfigureProviderRefreshRequest {
             request_id: String::new(),
+            expected_resource_version: 0,
             provider: "stable-refresh".to_string(),
             credential_key: "ACCESS_TOKEN".to_string(),
             strategy: ProviderCredentialRefreshStrategy::Oauth2ClientCredentials as i32,
@@ -15263,6 +15379,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "my-aws-v2".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15322,6 +15439,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-endpoint-override".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15402,6 +15520,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-partial-source".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15458,6 +15577,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-lone-session".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15517,6 +15637,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-outputs".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15598,6 +15719,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-update-guard".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15695,6 +15817,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "generic-no-profile".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15750,6 +15873,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "aws-wrong-key".to_string(),
                 credential_key: "AWS_SECRET_ACCESS_KEY".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -15936,6 +16060,7 @@ mod tests {
             &state,
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: "new-aws-provider".to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,
@@ -16014,6 +16139,7 @@ mod tests {
         let configure = |provider: &str| {
             authed_request(ConfigureProviderRefreshRequest {
                 request_id: String::new(),
+                expected_resource_version: 0,
                 provider: provider.to_string(),
                 credential_key: "AWS_ACCESS_KEY_ID".to_string(),
                 strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,

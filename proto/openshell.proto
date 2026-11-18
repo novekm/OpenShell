@@ -2604,6 +2604,10 @@ message ConfigureProviderRefreshRequest {
   // Optional nonzero UUID for durable at-most-once admission. Successful results
   // can be replayed for 24 hours; see the API errors and retries reference.
   string request_id = 8;
+  // Expected provider resource version for optimistic concurrency control.
+  // If 0, the server uses the current version. If non-zero, the server returns
+  // ABORTED unless the provider's current resource_version matches.
+  uint64 expected_resource_version = 9;
 }
 
 message ConfigureProviderRefreshResponse {
@@ -2618,6 +2622,11 @@ message RotateProviderCredentialRequest {
   // Optional nonzero UUID for durable at-most-once admission. Successful results
   // can be replayed for 24 hours; see the API errors and retries reference.
   string request_id = 4;
+  // Expected provider resource version for optimistic concurrency control.
+  // If 0, the server uses the current version. If non-zero, the server returns
+  // ABORTED unless the provider's current resource_version matches when the
+  // rotation starts.
+  uint64 expected_resource_version = 5;
 }
 
 message RotateProviderCredentialResponse {
