@@ -8812,11 +8812,11 @@ mod tests {
             )),
         };
 
-        let stale =
+        let stale_configure =
             handle_configure_provider_refresh(&state, authed_request(configure(version + 1)))
                 .await
                 .unwrap_err();
-        assert_eq!(stale.code(), tonic::Code::Aborted);
+        assert_eq!(stale_configure.code(), Code::Aborted);
         assert!(
             state
                 .refresh
@@ -8839,10 +8839,11 @@ mod tests {
                 "default".to_string(),
             )),
         };
-        let stale = handle_rotate_provider_credential(&state, authed_request(rotate(version + 1)))
-            .await
-            .unwrap_err();
-        assert_eq!(stale.code(), tonic::Code::Aborted);
+        let stale_rotate =
+            handle_rotate_provider_credential(&state, authed_request(rotate(version + 1)))
+                .await
+                .unwrap_err();
+        assert_eq!(stale_rotate.code(), Code::Aborted);
     }
 
     #[tokio::test]
