@@ -2710,6 +2710,10 @@ message ListProviderProfilesResponse {
   repeated ProviderProfile profiles = 1;
   // Token for the next page. Empty when there are no subsequent pages.
   string next_page_token = 2;
+  // True when the gateway enforces `expected_resource_version` on provider
+  // refresh configuration and rotation. A gateway that predates the field
+  // ignores it, so a client that depends on the guard checks this first.
+  bool supports_refresh_resource_version_preconditions = 3;
 }
 
 // Import custom provider profiles request.

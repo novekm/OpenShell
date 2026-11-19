@@ -3046,6 +3046,7 @@ pub(super) async fn handle_list_provider_profiles(
     Ok(Response::new(ListProviderProfilesResponse {
         profiles: profiles.into_iter().map(|(_, profile)| profile).collect(),
         next_page_token,
+        supports_refresh_resource_version_preconditions: true,
     }))
 }
 
@@ -7497,6 +7498,7 @@ mod tests {
         .await
         .unwrap()
         .into_inner();
+        assert!(response.supports_refresh_resource_version_preconditions);
 
         let ids = response
             .profiles

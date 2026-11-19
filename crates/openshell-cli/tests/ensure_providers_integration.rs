@@ -427,6 +427,7 @@ impl OpenShell for TestOpenShell {
             openshell_core::proto::ListProviderProfilesResponse {
                 profiles,
                 next_page_token: String::new(),
+                supports_refresh_resource_version_preconditions: false,
             },
         ))
     }
